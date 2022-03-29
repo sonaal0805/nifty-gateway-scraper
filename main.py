@@ -1,80 +1,50 @@
 import asyncio
-import aiohttp
-import datetime
 import pandas as pd
 import sys
-from itertools import cycle
-import multiprocessing
-import json
+import requests
+import os
 
-conn = aiohttp.TCPConnector()
-
-from utils import search_headers, nifty_headers, get_proxies, get_proxy_string
-
-search_url = 'https://host-vdgrw7.api.swiftype.com/api/as/v1/engines/nifties-search/search'
 ranked_stats_url = 'https://api.niftygateway.com//market/ranked-stats/'
-# ranked_stats_url = 'https://api.niftygateway.com'
-proxies = get_proxies()
-print('proxies: ',proxies)
-proxy_pool = cycle(proxies)
-print('proxy_pool: ',proxies)
+
 worker_count = 30
 nifty_responses = []
 final_nifties = []
 
 async def fetch(nifty):
+
     """
     Get stats for given nifty object
     :param nifty: Nifty json object
     :return:
     """
-    data = f'{{"query":"","page":{{"current":1,"size":2}},"filters":{{"all":[{{"contract_address":["{nifty["unminted_nifty_obj"]["contractObj"]["contractAddress"]}"]}},{{"nifty_type_that_created":"1"}},{{"currently_on_sale":"true"}}]}},"sort":{{"price_in_cents":"asc"}}}}'
-    proxy = next(proxy_pool)
+ 
+    contract_name = nifty["unminted_nifty_obj"]["niftyTitle"]
+    nifty_name = nifty["unminted_nifty_obj"]["niftyTitle"]
+    nifty_date_created = nifty["date_created"]
+    nifty_date_modified = nifty["date_modified"]
+    num_pm_sales = nifty["number_of_pm_sales"]
+    num_sm_sales = nifty["number_of_sm_sales"]
+    original_price = nifty['orig_price_in_cents']
+    avg_resale_price = nifty["average_secondary_market_sale_price_in_cents"]
 
-    async with aiohttp.ClientSession(headers=search_headers, trust_env=True, connector=conn) as session:
-        async with session.get(search_url, data=data, proxy=get_proxy_string(proxy), ssl=False) as response:
-        # async with session.get(search_url, data=data) as response:
-            print('CONNECTION ESTABLISHED!!')
-            res = await response.json()
+    sm_market_volume = nifty["sum_of_primary_market_sales_in_cents"]
 
-            # There might be no price for item
-            if res["meta"]["page"]["total_results"] != 0:
-                price = res["results"][0]["price_in_cents"]["raw"]
-            else:
-                price = None
+    nifty_obj_dict = {
 
-            # Create variables for all stats. You can create your own stats such as SM / PM ratio.
-            contract_address = nifty["unminted_nifty_obj"]["contractObj"]["contractAddress"]
-            contract_url = f'https://niftygateway.com/itemdetail/primary/{contract_address}/1'
-            contract_name = nifty["unminted_nifty_obj"]["niftyTitle"]
-            nifty_name = nifty["unminted_nifty_obj"]["niftyTitle"]
-            store_url = f'https://niftygateway.com/collections/{nifty["unminted_nifty_obj"]["contractObj"]["storeURL"]}'
-            nifty_date_created = nifty["date_created"]
-            num_pm_sales = nifty["number_of_pm_sales"]
-            num_sm_sales = nifty["number_of_sm_sales"]
-            avg_resale_price = nifty["average_secondary_market_sale_price_in_cents"]
-            highest_active_bid = nifty["highest_bid_in_cents"]
-            lowest_active_ask = nifty["lowest_ask_in_cents"]
-            sm_market_volume = nifty["sum_of_primary_market_sales_in_cents"]
+        "contract_name": contract_name,
+        "nifty_name": nifty_name,
+        "nifty_date_created": nifty_date_created,
+        "nifty_date_modified": nifty_date_modified,
+        "num_pm_sales": num_pm_sales,
+        "num_sm_sales": num_sm_sales,
+        "avg_resale_price": avg_resale_price,
+        'original_price' : original_price,
 
-            nifty_obj_dict = {
-                "contract_address": contract_address,
-                "contract_url": contract_url,
-                "contract_name": contract_name,
-                "nifty_name": nifty_name,
-                "store_url": store_url,
-                "nifty_date_created": nifty_date_created,
-                "num_pm_sales": num_pm_sales,
-                "num_sm_sales": num_sm_sales,
-                "avg_resale_price": avg_resale_price,
-                "highest_active_bid": highest_active_bid,
-                "lowest_active_ask": lowest_active_ask,
-                "sm_market_volume": sm_market_volume,
-                "price": price,
-            }
+        "sm_market_volume": sm_market_volume,
 
-            # Append dictionary to nifties list
-            final_nifties.append(nifty_obj_dict)
+    }
+    # Append dictionary to nifties list
+    final_nifties.append(nifty_obj_dict)
 
 
 async def worker(queue):
@@ -85,16 +55,47 @@ async def worker(queue):
     """
     print('START WORKER')
     while True:
-        # Each time, get a nifty object from queue
         nifty = await queue.get()
         await fetch(nifty)
         queue.task_done()
-        if len(final_nifties) == len(nifty_responses):
-            # Finally, add all of them into a dataframe and save as csv
-            df = pd.DataFrame(final_nifties)
-            df.to_csv("nifty_prices.csv")
-            sys.exit()
 
+        if len(final_nifties) == len(nifty_responses):
+            print('len(nifty_responses): ', len(nifty_responses))
+            print('Starting Dataframe preparation')
+            df = pd.DataFrame(final_nifties)
+            df['nifty_date_created'] = pd.to_datetime(df['nifty_date_created'])
+            df.sort_values(by = 'nifty_date_created')
+
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+
+            file_path = dir_path+'/Q2_results.csv'
+            df.to_csv(file_path)
+
+
+            """ I am using "nifty_date_created" as a proxy for date of primary sale."""
+
+            df = df[(df['nifty_date_created'] >= '2021-10-13')]
+
+            df = df[(df['nifty_date_created'] <= '2021-10-20')]
+
+            df['nifty_date_created'] = [str(i)[:10] for i in df['nifty_date_created']]
+            df['sales_volume(USD)'] = df['num_pm_sales'] * df['original_price']
+            df['sales_volume(USD)'] = df['sales_volume(USD)']/100
+
+            df_new = df.groupby('nifty_date_created').sum()[["sales_volume(USD)", "num_pm_sales"]]
+
+            d = df_new.dtypes
+            df_new.loc['Total'] = df_new.sum(numeric_only=True)
+            df_new.astype(d)
+
+            df_new = df_new.rename(columns = { "num_pm_sales": "num_primary_market_sales"})
+
+            file_path = dir_path+'/Q2_results_filtered.csv'
+            df_new.to_csv(file_path)
+
+            print('TASK COMPLETE')
+            sys.exit()
+        
 
 async def control(queue):
     """
@@ -103,12 +104,8 @@ async def control(queue):
     :return:
     """
     for nifty in nifty_responses:
-        print(datetime.datetime.now())
         queue.put_nowait(nifty)
-
-        # Sleep to slow down execution a bit.
         await asyncio.sleep(0.02)
-
 
 async def main():
     await get_nifties()
@@ -118,48 +115,26 @@ async def main():
         asyncio.gather(*[worker(queue) for _ in range(worker_count)])
     )
 
-
 async def get_nifties():
     global nifty_responses
 
     page = 1
     while True:
-        data = f'{{"size":1000, "current":{page}, "ranking_type" :"number_of_pm_sales","order_by" :"asc","cancelToken":{{"promise":{{}}}},"timeout":300000}}'
-        # data = f'{{"size":100, "current":{page}, "ranking_type" :"number_of_sm_sales","order_by" :"asc"}}'
+        url = ranked_stats_url+'?'+'size=100&'+'current='+'{}'.format(page)+'&ranking_type=number_of_pm_sales&order_by=asc'
+        r = requests.get(url)
 
-        proxy = next(proxy_pool)
-        print('proxy: ',proxy)
-        async with aiohttp.ClientSession() as session:
-            async with session.post(ranked_stats_url, headers=nifty_headers, data=data) as response:
-            # async with session.post(ranked_stats_url, data = data, headers=nifty_headers ) as response:
-                print(response)
-                # response = str(response)
-                # response = response.replace('<CIMultiDictProxy(', '{')
-                # response = response.replace(')>', '}')
-                # response = response.replace('<ClientResponse(https://api.niftygateway.com/v1//market/ranked-stats/) [200 OK]>', '')
-                # print('response: ',response)
-                # response_json = await response.json()
-                # try:
-                #     response = response.decode('utf-8').replace('\0', '')
-                #     response_json = json.loads(response)
-                #     print('good json: ',response_json)
-                # except:
-                #     print('bad json: ', response_json)
+        response_json = r.json()
 
-                # response_json = json.loads(response)
-                # print(response_json)
-                response_json = await response.json()
-                # response_json = await response.CIMultiDict()
+        # print('response_json: ',response_json)
+        response_json_updated = response_json["data"]["results"]
 
-
-                print('response_json: ',response_json)
-                response_json_updated = response_json["data"]["results"]
-
-                nifty_responses.extend(response_json_updated)
-                if response_json["data"]["meta"]["page"]["total_pages"] == page:
-                    break
-                else:
-                    page += 1
+        nifty_responses.extend(response_json_updated)
+        if response_json["data"]["meta"]["page"]["total_pages"] == page:
+        # if 10 == page:
+            break
+        else:
+            page += 1
+            print('status: {}/{}'.format(page,response_json["data"]["meta"]["page"]["total_pages"]))
 
 
 if __name__ == '__main__':
